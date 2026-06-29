@@ -11,7 +11,7 @@
  * Setup:
  *   1. Subscribe at app.cline.bot and create an API key (Settings → API Keys)
  *   2. Set CLINE_API_KEY env var, run `pi /login` and select ClinePass,
- *      or configure ~/.cline/auth.json
+ *      or sign in with the Cline CLI (`cline auth`) for automatic reuse
  *   3. Install: pi install git:github.com/jellydn/pi-clinepass-provider
  *   4. Use /model to select a ClinePass model
  *
@@ -51,14 +51,12 @@ export default function (pi: ExtensionAPI) {
       refreshToken,
       getApiKey: oauthGetApiKey,
     },
+    // Spread the model object so all fields (including future ones like
+    // `compat` / `thinkingFormat`) propagate to pi automatically. Only
+    // `input` needs transformation: readonly tuple → mutable array.
     models: MODELS.map((model) => ({
-      id: model.id,
-      name: model.name,
-      reasoning: model.reasoning,
+      ...model,
       input: [...model.input],
-      cost: model.cost,
-      contextWindow: model.contextWindow,
-      maxTokens: model.maxTokens,
     })),
   });
 }

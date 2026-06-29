@@ -21,8 +21,8 @@ pi extension that registers ClinePass as a model provider via pi's built-in `ope
 ## Architecture
 
 - **`src/index.ts`** — Extension entry. Calls `pi.registerProvider()`, wires models + OAuth + API base.
-- **`src/logic.ts`** — Pure logic: model definitions, API key resolution (env var → `~/.cline/auth.json` → `~/.pi/agent/auth.json`), sanitization, URL builder. All I/O parameterized for testability.
-- **`src/oauth.ts`** — `/login` flow: opens browser, user pastes key, stores with 10-year expiry.
+- **`src/logic.ts`** — Pure logic: model definitions, API key resolution (env var → `~/.cline/data/settings/providers.json` → `~/.pi/agent/auth.json`), WorkOS OAuth credential parsing (`resolveClineAuthCredentials`, `isWorkosToken`), sanitization, URL builder. All I/O parameterized for testability.
+- **`src/oauth.ts`** — `/login` flow with two paths: (1) WorkOS OAuth — detects existing Cline CLI credentials from providers.json and refreshes via Cline's `/api/v1/auth/refresh` endpoint; (2) Static API key — browser-assisted manual paste. `refreshToken()` auto-detects WorkOS vs static keys.
 
 ## Testing
 
@@ -44,4 +44,6 @@ pi install git:github.com/jellydn/pi-clinepass-provider
 - **Local dev setup:** `npm install` is sufficient — peer deps (`@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`) are in `devDependencies`.
 - Module IDs use prefix `cline-pass/` (e.g. `cline-pass/deepseek-v4-flash`). When invoking pi, use `--model clinepass/cline-pass/...`.
 - `CLINE_API_BASE` env var overrides the API endpoint (default: `https://api.cline.bot`).
+- **WorkOS OAuth refresh** calls Cline's `/api/v1/auth/refresh` with `{granttype, refreshToken}` (note: `granttype` has no underscore). Response: `{data: {accessToken, refreshToken}}`. Access tokens need `workos:` prefix for the chat API.
+- **Token refresh rotation**: each refresh returns a new `refreshToken` — the old one is single-use.
 - Lint disables `unicorn/consistent-function-scoping` in test files (`.oxlintrc.json` override).

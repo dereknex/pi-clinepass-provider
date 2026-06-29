@@ -186,8 +186,9 @@ export interface AuthKeyOptions {
  * providers["cline-pass"].settings.auth.accessToken
  *
  * Note: the auth.accessToken from the Cline CLI is a short-lived WorkOS OAuth
- * token — it may be expired. Users should generate a static API key from
- * app.cline.bot → Settings → API Keys for reliable access.
+ * token — it may be expired. Only static apiKey values are returned from this
+ * function; WorkOS access tokens are handled separately via
+ * resolveClineAuthCredentials() + the OAuth refresh flow in oauth.ts.
  */
 function resolveClineProvidersKey(parsed: Record<string, unknown>): string | undefined {
   const providers = isRecord(parsed.providers) ? parsed.providers : undefined;
@@ -200,16 +201,14 @@ function resolveClineProvidersKey(parsed: Record<string, unknown>): string | und
     const settings = isRecord(provider.settings) ? provider.settings : undefined;
     if (!settings) continue;
 
-    // Static API key: settings.apiKey
+    // Static API key: settings.apiKey (long-lived, safe to use directly)
     const apiKey = stringValue(settings.apiKey);
     if (apiKey) return apiKey;
 
-    // OAuth token: settings.auth.accessToken
-    const auth = isRecord(settings.auth) ? settings.auth : undefined;
-    if (auth) {
-      const accessToken = stringValue(auth.accessToken);
-      if (accessToken) return accessToken;
-    }
+    // Note: we intentionally do NOT return settings.auth.accessToken here.
+    // That is a short-lived WorkOS OAuth token that expires after ~1 hour and
+    // cannot be used as a static API key. It is handled via the OAuth refresh
+    // flow in oauth.ts (resolveClineAuthCredentials + refreshWorkosToken).
   }
   return undefined;
 }
@@ -260,11 +259,108 @@ export function resolveApiKey(
         const access = stringValue(cpField.access);
         if (access) return access;
       }
-    } catch {
-      // ignore malformed or unreadable auth files
+    } catch (e) {
+      // Distinguish "file absent" (expected, skip silently) from
+      // "file present but corrupt/unreadable" (actionable, warn).
+      // Never log file contents or the resolved key.
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!msg.includes("ENOENT") && !msg.includes("not found")) {
+        console.warn(`[clinepass] Warning: failed to read auth file ${authPath}: ${msg}`);
+      }
     }
   }
 
+  return undefined;
+}
+
+// ─── WorkOS OAuth Token Support ─────────────────────────────────────────────
+
+/** Prefix that identifies WorkOS OAuth access tokens (e.g. "workos:eyJ..."). */
+export const WORKOS_TOKEN_PREFIX = "workos:";
+
+/** Cline's server-side token refresh endpoint (relative to the API base). */
+export const CLINE_REFRESH_ENDPOINT = "/api/v1/auth/refresh";
+
+/** Conservative token lifetime estimate (WorkOS tokens last ~1 hour). */
+export const WORKOS_TOKEN_LIFETIME_MS = 55 * 60 * 1000;
+
+/** Refresh tokens 5 minutes before expiry to avoid race conditions. */
+export const WORKOS_REFRESH_MARGIN_MS = 5 * 60 * 1000;
+
+/**
+ * WorkOS OAuth credentials extracted from the Cline CLI's providers.json.
+ * These are short-lived (~1 hour) and need refresh via Cline's endpoint.
+ */
+export interface ClineAuthCredentials {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number;
+}
+
+/**
+ * Check whether a token string is a WorkOS OAuth access token.
+ * WorkOS tokens are prefixed with "workos:" (e.g. "workos:eyJ...").
+ */
+export function isWorkosToken(token: string): boolean {
+  return token.startsWith(WORKOS_TOKEN_PREFIX);
+}
+
+/**
+ * Extract WorkOS OAuth credentials (accessToken + refreshToken + expiresAt)
+ * from the Cline CLI's providers.json.
+ *
+ * Looks for providers["cline-pass"].settings.auth or providers["cline"].settings.auth.
+ * Returns undefined if no valid WorkOS credentials (both accessToken and
+ * refreshToken) are found.
+ *
+ * Note: the accessToken may be expired — callers should refresh via
+ * Cline's /api/v1/auth/refresh endpoint before use.
+ */
+export function resolveClineAuthCredentials(
+  options: AuthKeyOptions = {},
+): ClineAuthCredentials | undefined {
+  const home = options.homeDir?.() ?? homedir();
+  const authPaths = options.authPaths ?? defaultAuthPaths(home);
+  const readFile = options.readFile ?? ((p: string) => readFileSync(p, "utf-8"));
+  const fileExists = options.fileExists ?? ((p: string) => existsSync(p));
+
+  for (const authPath of authPaths) {
+    try {
+      if (!fileExists(authPath)) continue;
+      const parsed: unknown = JSON.parse(readFile(authPath));
+      if (!isRecord(parsed)) continue;
+
+      const providers = isRecord(parsed.providers) ? parsed.providers : undefined;
+      if (!providers) continue;
+
+      for (const key of ["cline-pass", "cline"]) {
+        const provider = isRecord(providers[key]) ? providers[key] : undefined;
+        if (!provider) continue;
+        const settings = isRecord(provider.settings) ? provider.settings : undefined;
+        if (!settings) continue;
+        const auth = isRecord(settings.auth) ? settings.auth : undefined;
+        if (!auth) continue;
+
+        const accessToken = stringValue(auth.accessToken);
+        const refreshToken = stringValue(auth.refreshToken);
+        if (!accessToken || !refreshToken) continue;
+
+        const expiresAt =
+          typeof auth.expiresAt === "number"
+            ? auth.expiresAt
+            : Date.now() + WORKOS_TOKEN_LIFETIME_MS;
+
+        return { accessToken, refreshToken, expiresAt };
+      }
+    } catch (e) {
+      // Distinguish "file absent" (expected, skip silently) from
+      // "file present but corrupt/unreadable" (actionable, warn).
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!msg.includes("ENOENT") && !msg.includes("not found")) {
+        console.warn(`[clinepass] Warning: failed to read auth file ${authPath}: ${msg}`);
+      }
+    }
+  }
   return undefined;
 }
 

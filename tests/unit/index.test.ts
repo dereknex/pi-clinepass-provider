@@ -1,0 +1,76 @@
+import { describe, it, expect } from "vitest";
+import { DEFAULT_API_BASE, ENV_API_KEY, PROVIDER_NAME, MODELS } from "../../src/logic.js";
+
+/**
+ * Verifies the provider registration shape passed to pi.registerProvider.
+ * Uses a fake ExtensionAPI that captures the call args so we can assert
+ * baseUrl, apiKey sigil, api type, oauth wiring, and model forwarding.
+ */
+describe("provider registration", () => {
+  it("registers with correct baseUrl, apiKey, and api type", async () => {
+    let captured: { name: string; config: Record<string, unknown> } | undefined;
+
+    const fakePi = {
+      registerProvider(name: string, config: Record<string, unknown>) {
+        captured = { name, config };
+      },
+    };
+
+    const mod = await import("../../src/index.js");
+    mod.default(fakePi as never);
+
+    expect(captured).toBeDefined();
+    expect(captured!.name).toBe(PROVIDER_NAME);
+    expect(captured!.config.baseUrl).toBe(`${DEFAULT_API_BASE}/api/v1`);
+    expect(captured!.config.apiKey).toBe(`$${ENV_API_KEY}`);
+    expect(captured!.config.api).toBe("openai-completions");
+    expect(captured!.config.authHeader).toBe(true);
+  });
+
+  it("registers all models with correct fields", async () => {
+    let captured: { config: Record<string, unknown> } | undefined;
+
+    const fakePi = {
+      registerProvider(_name: string, config: Record<string, unknown>) {
+        captured = { config };
+      },
+    };
+
+    const mod = await import("../../src/index.js");
+    mod.default(fakePi as never);
+
+    const models = captured!.config.models as Array<Record<string, unknown>>;
+    expect(models).toHaveLength(MODELS.length);
+
+    for (let i = 0; i < MODELS.length; i++) {
+      expect(models[i].id).toBe(MODELS[i].id);
+      expect(models[i].name).toBe(MODELS[i].name);
+      expect(models[i].reasoning).toBe(MODELS[i].reasoning);
+      expect(models[i].cost).toEqual(MODELS[i].cost);
+      expect(models[i].contextWindow).toBe(MODELS[i].contextWindow);
+      expect(models[i].maxTokens).toBe(MODELS[i].maxTokens);
+      // input should be a mutable array copy, not the readonly tuple
+      expect(models[i].input).toEqual([...MODELS[i].input]);
+      expect(Array.isArray(models[i].input)).toBe(true);
+    }
+  });
+
+  it("wires oauth with login, refreshToken, and getApiKey", async () => {
+    let captured: { config: Record<string, unknown> } | undefined;
+
+    const fakePi = {
+      registerProvider(_name: string, config: Record<string, unknown>) {
+        captured = { config };
+      },
+    };
+
+    const mod = await import("../../src/index.js");
+    mod.default(fakePi as never);
+
+    const oauth = captured!.config.oauth as Record<string, unknown>;
+    expect(oauth.name).toBe("ClinePass");
+    expect(typeof oauth.login).toBe("function");
+    expect(typeof oauth.refreshToken).toBe("function");
+    expect(typeof oauth.getApiKey).toBe("function");
+  });
+});

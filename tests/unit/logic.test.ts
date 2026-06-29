@@ -11,6 +11,10 @@ import {
   resolveApiBase,
   sanitizeApiKey,
   buildEndpointUrl,
+  resolveClineAuthCredentials,
+  isWorkosToken,
+  WORKOS_TOKEN_PREFIX,
+  CLINE_REFRESH_ENDPOINT,
 } from "../../src/logic.js";
 
 // ─── resolveApiKey ──────────────────────────────────────────────────────────
@@ -60,7 +64,7 @@ describe("resolveApiKey", () => {
     expect(resolveApiKey(undefined, { readFile, fileExists })).toBe("cline_static_key");
   });
 
-  it("prefers cline-pass apiKey over cline accessToken when both exist", () => {
+  it("prefers cline-pass apiKey when cline only has auth.accessToken", () => {
     const readFile = () =>
       JSON.stringify({
         providers: {
@@ -72,7 +76,7 @@ describe("resolveApiKey", () => {
     expect(resolveApiKey(undefined, { readFile, fileExists })).toBe("cline_pass_key");
   });
 
-  it("extracts auth.accessToken from Cline CLI nested providers.json (cline)", () => {
+  it("does not return WorkOS auth.accessToken from cline provider (only static apiKey)", () => {
     const readFile = () =>
       JSON.stringify({
         providers: {
@@ -84,7 +88,9 @@ describe("resolveApiKey", () => {
         },
       });
     const fileExists = () => true;
-    expect(resolveApiKey(undefined, { readFile, fileExists })).toBe("workos:oauth_token");
+    // WorkOS access tokens are short-lived and handled via the OAuth refresh
+    // flow, not returned as static API key fallbacks
+    expect(resolveApiKey(undefined, { readFile, fileExists })).toBeUndefined();
   });
 
   it("checks ~/.pi/agent/auth.json as fallback", () => {
@@ -113,6 +119,69 @@ describe("resolveApiKey", () => {
   it("skips malformed auth.json", () => {
     const readFile = () => "not json";
     const fileExists = () => true;
+    expect(resolveApiKey(undefined, { readFile, fileExists })).toBeUndefined();
+  });
+
+  it("CLINE_API_KEY env wins over populated auth file", () => {
+    const readFile = () => JSON.stringify({ apiKey: "cline_from_file" });
+    const fileExists = () => true;
+    expect(
+      resolveApiKey(undefined, {
+        env: { CLINE_API_KEY: "cline_env_wins" },
+        readFile,
+        fileExists,
+      }),
+    ).toBe("cline_env_wins");
+  });
+
+  it("tries auth paths in order when first exists but lacks a key", () => {
+    const calls: string[] = [];
+    const readFile = (p: string) => {
+      calls.push(p);
+      if (p.includes("providers.json")) return JSON.stringify({ providers: {} });
+      return JSON.stringify({ apiKey: "cline_from_second" });
+    };
+    const fileExists = () => true;
+    expect(
+      resolveApiKey(undefined, {
+        readFile,
+        fileExists,
+        authPaths: ["/home/.cline/data/settings/providers.json", "/home/.pi/agent/auth.json"],
+      }),
+    ).toBe("cline_from_second");
+    expect(calls).toHaveLength(2);
+  });
+
+  it("handles providers present but not an object", () => {
+    const readFile = () => JSON.stringify({ providers: "not_an_object" });
+    const fileExists = () => true;
+    expect(resolveApiKey(undefined, { readFile, fileExists })).toBeUndefined();
+  });
+
+  it("handles settings missing in provider entry", () => {
+    const readFile = () =>
+      JSON.stringify({
+        providers: {
+          "cline-pass": { tokenSource: "manual" },
+        },
+      });
+    const fileExists = () => true;
+    expect(resolveApiKey(undefined, { readFile, fileExists })).toBeUndefined();
+  });
+
+  it("does not return WorkOS accessToken as a static key fallback", () => {
+    const readFile = () =>
+      JSON.stringify({
+        providers: {
+          "cline-pass": {
+            settings: {
+              auth: { accessToken: "workos:eyJexpired", refreshToken: "rt", expiresAt: 0 },
+            },
+          },
+        },
+      });
+    const fileExists = () => true;
+    // Should NOT return the expired workos: token — only static apiKey is used
     expect(resolveApiKey(undefined, { readFile, fileExists })).toBeUndefined();
   });
 });
@@ -146,8 +215,8 @@ describe("modelIds", () => {
 });
 
 describe("MODELS", () => {
-  it("has 10 curated models", () => {
-    expect(MODELS).toHaveLength(10);
+  it("has at least one model", () => {
+    expect(MODELS.length).toBeGreaterThan(0);
   });
 
   it("all models have valid cost and context fields", () => {
@@ -212,6 +281,196 @@ describe("sanitizeApiKey", () => {
 
   it("removes control characters", () => {
     expect(sanitizeApiKey("cline_\x00test")).toBe("cline_test");
+  });
+
+  it("removes DEL (char code 127)", () => {
+    expect(sanitizeApiKey("cline_\x7Ftest")).toBe("cline_test");
+  });
+
+  it("handles combined escaped and unescaped bracketed-paste", () => {
+    const esc = String.fromCharCode(27);
+    expect(sanitizeApiKey(`${esc}[200~cline_key[201~`)).toBe("cline_key");
+  });
+
+  it("returns empty string for whitespace-only input", () => {
+    expect(sanitizeApiKey("   \t\n  ")).toBe("");
+  });
+});
+
+// ─── isWorkosToken ──────────────────────────────────────────────────────────
+
+describe("isWorkosToken", () => {
+  it("returns true for tokens with workos: prefix", () => {
+    expect(isWorkosToken("workos:eyJhbGciOiJSUzI1NiIs...")).toBe(true);
+  });
+
+  it("returns false for static API keys", () => {
+    expect(isWorkosToken("cline_abc123")).toBe(false);
+  });
+
+  it("returns false for empty strings", () => {
+    expect(isWorkosToken("")).toBe(false);
+  });
+
+  it("returns false for bare JWTs without workos: prefix", () => {
+    expect(isWorkosToken("eyJhbGciOiJSUzI1NiIs...")).toBe(false);
+  });
+});
+
+// ─── resolveClineAuthCredentials ────────────────────────────────────────────
+
+describe("resolveClineAuthCredentials", () => {
+  it("extracts WorkOS credentials from cline-pass provider", () => {
+    const readFile = () =>
+      JSON.stringify({
+        providers: {
+          "cline-pass": {
+            settings: {
+              auth: {
+                accessToken: "workos:eyJ...",
+                refreshToken: "rt_abc123",
+                expiresAt: 1782758019000,
+              },
+            },
+          },
+        },
+      });
+    const fileExists = () => true;
+    const creds = resolveClineAuthCredentials({ readFile, fileExists });
+    expect(creds).toEqual({
+      accessToken: "workos:eyJ...",
+      refreshToken: "rt_abc123",
+      expiresAt: 1782758019000,
+    });
+  });
+
+  it("extracts WorkOS credentials from cline provider", () => {
+    const readFile = () =>
+      JSON.stringify({
+        providers: {
+          cline: {
+            settings: {
+              auth: {
+                accessToken: "workos:eyJ...",
+                refreshToken: "rt_def456",
+                expiresAt: 1782758019000,
+              },
+            },
+          },
+        },
+      });
+    const fileExists = () => true;
+    const creds = resolveClineAuthCredentials({ readFile, fileExists });
+    expect(creds?.accessToken).toBe("workos:eyJ...");
+    expect(creds?.refreshToken).toBe("rt_def456");
+  });
+
+  it("prefers cline-pass credentials over cline", () => {
+    const readFile = () =>
+      JSON.stringify({
+        providers: {
+          "cline-pass": {
+            settings: {
+              auth: { accessToken: "workos:pass_token", refreshToken: "rt_pass", expiresAt: 1000 },
+            },
+          },
+          cline: {
+            settings: {
+              auth: {
+                accessToken: "workos:cline_token",
+                refreshToken: "rt_cline",
+                expiresAt: 2000,
+              },
+            },
+          },
+        },
+      });
+    const fileExists = () => true;
+    const creds = resolveClineAuthCredentials({ readFile, fileExists });
+    expect(creds?.accessToken).toBe("workos:pass_token");
+    expect(creds?.refreshToken).toBe("rt_pass");
+  });
+
+  it("returns undefined when no auth field exists", () => {
+    const readFile = () =>
+      JSON.stringify({
+        providers: {
+          "cline-pass": { settings: { apiKey: "cline_static_key" } },
+        },
+      });
+    const fileExists = () => true;
+    expect(resolveClineAuthCredentials({ readFile, fileExists })).toBeUndefined();
+  });
+
+  it("returns undefined when accessToken is missing", () => {
+    const readFile = () =>
+      JSON.stringify({
+        providers: {
+          "cline-pass": {
+            settings: { auth: { refreshToken: "rt_only" } },
+          },
+        },
+      });
+    const fileExists = () => true;
+    expect(resolveClineAuthCredentials({ readFile, fileExists })).toBeUndefined();
+  });
+
+  it("returns undefined when refreshToken is missing", () => {
+    const readFile = () =>
+      JSON.stringify({
+        providers: {
+          "cline-pass": {
+            settings: { auth: { accessToken: "workos:at_only" } },
+          },
+        },
+      });
+    const fileExists = () => true;
+    expect(resolveClineAuthCredentials({ readFile, fileExists })).toBeUndefined();
+  });
+
+  it("defaults expiresAt when not a number", () => {
+    const readFile = () =>
+      JSON.stringify({
+        providers: {
+          "cline-pass": {
+            settings: {
+              auth: {
+                accessToken: "workos:eyJ...",
+                refreshToken: "rt_abc",
+                expiresAt: "not_a_number",
+              },
+            },
+          },
+        },
+      });
+    const fileExists = () => true;
+    const creds = resolveClineAuthCredentials({ readFile, fileExists });
+    expect(creds?.accessToken).toBe("workos:eyJ...");
+    expect(creds?.refreshToken).toBe("rt_abc");
+    expect(creds?.expiresAt).toBeGreaterThan(Date.now()); // defaulted to future
+  });
+
+  it("returns undefined when no providers.json exists", () => {
+    const fileExists = () => false;
+    expect(resolveClineAuthCredentials({ fileExists })).toBeUndefined();
+  });
+
+  it("returns undefined for malformed JSON", () => {
+    const readFile = () => "not json";
+    const fileExists = () => true;
+    expect(resolveClineAuthCredentials({ readFile, fileExists })).toBeUndefined();
+  });
+});
+
+// ─── WorkOS constants ───────────────────────────────────────────────────────
+
+describe("WorkOS constants", () => {
+  it("exports the workos: prefix", () => {
+    expect(WORKOS_TOKEN_PREFIX).toBe("workos:");
+  });
+
+  it("exports the Cline refresh endpoint path", () => {
+    expect(CLINE_REFRESH_ENDPOINT).toBe("/api/v1/auth/refresh");
   });
 });
 

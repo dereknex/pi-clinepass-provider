@@ -31,8 +31,11 @@
     "LICENSE"
   ],
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-ai": ">=0.80 <0.90",
+    "@earendil-works/pi-coding-agent": ">=0.80 <0.90"
+  },
+  "engines": {
+    "node": ">=22"
   },
   "pi": {
     "extensions": [
@@ -51,7 +54,9 @@
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.80.2",
     "@earendil-works/pi-coding-agent": "^0.80.2",
-    "@types/node": "^26.0.1",
+    "@types/node": "^22.0.0",
+    "oxfmt": "^0.56.0",
+    "oxlint": "^1.71.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.5"
   }

@@ -16,17 +16,22 @@ NC='\033[0m' # No Color
 
 PASS=0
 FAIL=0
-SKIP=0
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
 PROVIDER_PATH="$(cd "$(dirname "$0")/../.." && pwd)"
-TIMEOUT=45
+TIMEOUT="${TIMEOUT:-45}"
 API_BASE="${CLINE_API_BASE:-https://api.cline.bot}"
 
 if [ -z "${CLINE_API_KEY:-}" ]; then
   echo -e "${RED}ERROR: CLINE_API_KEY not set${NC}"
   echo "Usage: CLINE_API_KEY=your_key bash tests/e2e/smoke.sh"
+  exit 1
+fi
+
+if ! command -v pi &>/dev/null; then
+  echo -e "${RED}ERROR: pi not found on PATH${NC}"
+  echo "Install: npm install -g @earendil-works/pi-coding-agent"
   exit 1
 fi
 
@@ -124,7 +129,7 @@ output=$(CLINE_API_KEY="invalid_key_12345" \
   --no-tools \
   -p "test" 2>&1) || true
 
-if echo "$output" | grep -qi "error\|401\|403\|unauthorized\|invalid"; then
+if echo "$output" | grep -qi "401\|403\|unauthorized\|invalid.*key\|authentication"; then
   echo -e "${GREEN}PASS${NC}"
   ((PASS++)) || true
 else
@@ -141,7 +146,7 @@ output=$(timeout "$TIMEOUT" pi --no-extensions \
   --no-tools \
   -p "test" 2>&1) || true
 
-if echo "$output" | grep -qi "error"; then
+if echo "$output" | grep -qi "error\|not found\|invalid.*model\|does not exist"; then
   echo -e "${GREEN}PASS${NC}"
   ((PASS++)) || true
 else
@@ -156,7 +161,7 @@ echo ""
 # ─── Summary ─────────────────────────────────────────────────────────────────
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo -e "  ${GREEN}PASS${NC}: $PASS  ${RED}FAIL${NC}: $FAIL  ${YELLOW}SKIP${NC}: $SKIP"
+echo -e "  ${GREEN}PASS${NC}: $PASS  ${RED}FAIL${NC}: $FAIL"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 if [ "$FAIL" -gt 0 ]; then
